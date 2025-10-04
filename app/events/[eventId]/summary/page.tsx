@@ -10,7 +10,7 @@ export default function EventSummaryPage({ params }: SummaryPageProps) {
       <header className="space-y-2">
         <p className="text-xs uppercase tracking-wide text-slate-400">Event summary</p>
         <h1 className="text-3xl font-semibold text-slate-100">Event: {params.eventId}</h1>
-        <p className="text-slate-300">Static placeholder for slice counts and attendee stats.</p>
+        <p className="text-slate-300">Static placeholder for pizza counts and attendee stats.</p>
       </header>
 
       <section className="rounded-xl border border-white/10 bg-slate-900/60 p-6">
