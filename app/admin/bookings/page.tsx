@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import supabase from "../../../lib/supabaseClient";
+import { buildIcs } from "../../../lib/ics";
 
 type Booking = {
   id: string;
@@ -209,6 +210,34 @@ export default function AdminBookingsPage() {
     }
   }, [approveForm, fetchBookings, selectedBooking]);
 
+  const handleDownloadIcs = useCallback((booking: Booking) => {
+    if (!booking.event_date) {
+      return;
+    }
+
+    try {
+      const ics = buildIcs({
+        name: `${booking.customer_name} Event`,
+        start: booking.event_date,
+        address: booking.address,
+        description: booking.notes ?? undefined
+      });
+
+      const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const safeName = booking.customer_name.replace(/\s+/g, '_') || 'event';
+      link.href = url;
+      link.download = `${safeName}.ics`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (icsError) {
+      console.error('Failed to generate ICS file', icsError);
+    }
+  }, []);
+
   if (authorized === false) {
     return (
       <div className="mx-auto w-full max-w-4xl px-6 py-12">
@@ -343,6 +372,15 @@ export default function AdminBookingsPage() {
                         >
                           Approve
                         </button>
+                        {booking.status === "converted" && booking.event_date && (
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadIcs(booking)}
+                            className="inline-flex items-center justify-center rounded-lg border border-white/10 px-3 py-1.5 text-xs font-medium text-slate-100 transition hover:border-blue-400/60 hover:text-blue-300"
+                          >
+                            Download .ics
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

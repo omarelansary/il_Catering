@@ -31,6 +31,32 @@ const initialForm: FormState = {
   notes: ""
 };
 
+// Stub helper that illustrates how an automation flow (e.g. n8n) could be notified
+// after a booking request is stored. In production this could send an email to the
+// customer and ping the ops team.
+const notifyAutomation = async (bookingId: string) => {
+  const webhookUrl = process.env.NEXT_PUBLIC_AUTOMATION_WEBHOOK_URL;
+
+  if (!webhookUrl) {
+    // n8n webhook URL not configured yet; skip silently for now.
+    console.info("Automation webhook not configured; skipping notifyAutomation.");
+    return;
+  }
+
+  try {
+    await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ booking_id: bookingId })
+    });
+  } catch (automationError) {
+    // We swallow the error for now; in production you might log to an error tracker instead.
+    console.warn("notifyAutomation failed", automationError);
+  }
+};
+
 export default function BookPage() {
   const [form, setForm] = useState<FormState>(initialForm);
   const [submitting, setSubmitting] = useState(false);
@@ -103,20 +129,30 @@ export default function BookPage() {
     setError(null);
 
     try {
-      const { error: insertError } = await supabase.from("booking_requests").insert({
-        customer_name: form.customer_name.trim(),
-        customer_email: form.customer_email.trim(),
-        customer_phone: form.customer_phone.trim(),
-        event_date: form.event_date,
-        address: form.address.trim(),
-        package: form.package,
-        guests: form.guests,
-        notes: form.notes.trim(),
-        status: "requested"
-      });
+      const { data: insertedBooking, error: insertError } = await supabase
+        .from("booking_requests")
+        .insert({
+          customer_name: form.customer_name.trim(),
+          customer_email: form.customer_email.trim(),
+          customer_phone: form.customer_phone.trim(),
+          event_date: form.event_date,
+          address: form.address.trim(),
+          package: form.package,
+          guests: form.guests,
+          notes: form.notes.trim(),
+          status: "requested"
+        })
+        .select("id")
+        .single();
 
       if (insertError) {
         throw insertError;
+      }
+
+      // After we successfully store the booking, we could notify automation tooling (e.g. n8n)
+      // so that an email goes out to the customer and the admin gets an alert.
+      if (insertedBooking) {
+        void notifyAutomation(insertedBooking.id as string);
       }
 
       setSuccess(true);
