@@ -10,14 +10,14 @@ type FormState = {
   event_date: string;
   address: string;
   package: string;
+  guests: number;
   notes: string;
 };
 
 const packages = [
   { value: "", label: "Select a package" },
   { value: "standard", label: "Standard" },
-  { value: "premium", label: "Premium" },
-  { value: "vip", label: "VIP" }
+  { value: "premium", label: "Premium" }
 ];
 
 const initialForm: FormState = {
@@ -27,6 +27,7 @@ const initialForm: FormState = {
   event_date: "",
   address: "",
   package: "",
+  guests: 0,
   notes: ""
 };
 
@@ -40,7 +41,36 @@ export default function BookPage() {
     event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
   ) => {
     const { name, value } = event.target;
-    setForm((prev) => ({ ...prev, [name]: value }));
+
+    setForm((prev) => {
+      if (name === "guests") {
+        return { ...prev, guests: value === "" ? 0 : Math.max(0, Number(value)) };
+      }
+
+      if (name === "package") {
+        if (!value) {
+          return { ...prev, package: "", guests: 0 };
+        }
+
+        const minGuests = value === "premium" ? 10 : 25;
+        const previousMin = prev.package === "premium" ? 10 : prev.package === "standard" ? 25 : 0;
+        let nextGuests = prev.guests || 0;
+
+        if (nextGuests < minGuests) {
+          nextGuests = minGuests;
+        } else if (minGuests < previousMin && nextGuests <= previousMin) {
+          nextGuests = minGuests;
+        }
+
+        if (nextGuests === 0) {
+          nextGuests = minGuests;
+        }
+
+        return { ...prev, package: value, guests: nextGuests };
+      }
+
+      return { ...prev, [name]: value };
+    });
   };
 
   const validate = () => {
@@ -51,6 +81,10 @@ export default function BookPage() {
     if (!form.event_date.trim()) return "Event date and time are required.";
     if (!form.address.trim()) return "Address is required.";
     if (!form.package.trim()) return "Please select a package.";
+    const minGuests = form.package === 'premium' ? 10 : 25;
+    if (!Number.isFinite(form.guests) || form.guests < minGuests) {
+      return `Number of guests must be at least ${minGuests} for the ${form.package} package.`;
+    }
     return null;
   };
 
@@ -76,6 +110,7 @@ export default function BookPage() {
         event_date: form.event_date,
         address: form.address.trim(),
         package: form.package,
+        guests: form.guests,
         notes: form.notes.trim(),
         status: "requested"
       });
@@ -113,8 +148,9 @@ export default function BookPage() {
         )}
 
         {error && (
-          <div className="rounded-xl border border-rose-500/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200">
-            {error}
+          <div className="space-y-2 rounded-xl border border-rose-500/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200">
+            <p className="font-semibold text-rose-200">We couldn&apos;t submit your request yet.</p>
+            <p>{error}</p>
           </div>
         )}
 
@@ -192,6 +228,21 @@ export default function BookPage() {
               </option>
             ))}
           </select>
+        </label>
+
+        <label className="space-y-1 text-sm font-medium text-slate-200">
+          <span>Number of guests *</span>
+          <input
+            name="guests"
+            type="number"
+            min={form.package ? (form.package === "premium" ? 10 : 25) : undefined}
+            value={form.package ? (form.guests || "") : ""}
+            onChange={handleChange}
+            placeholder={form.package ? (form.package === "premium" ? "Minimum 10 guests" : "Minimum 25 guests") : "Select a package first"}
+            required
+            disabled={!form.package}
+            className="w-full rounded-lg border border-white/10 bg-slate-950/70 px-3 py-2 text-sm text-slate-100 focus:border-blue-400/60 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+          />
         </label>
 
         <label className="space-y-1 text-sm font-medium text-slate-200">
