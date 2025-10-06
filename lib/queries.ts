@@ -1,5 +1,5 @@
 import supabase from "./supabaseClient";
-import type { EventRow, Package, Pizza, PizzaTotal } from "./types";
+import type { EventRow, Pizza, PizzaTotal } from "./types";
 
 const sanitizeQty = (value: number): number =>
   Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
@@ -35,46 +35,34 @@ export async function getEventById(eventId: string): Promise<EventRow> {
 export async function getAllowedPizzasForEvent(
   eventId: string,
 ): Promise<Pizza[]> {
-  const { data, error } = await supabase
+  const { data: eventRow, error: eventError } = await supabase
     .from("events")
-    .select(
-      `
-        id,
-        package_id,
-        packages:package_id (
-          id,
-          label,
-          package_pizzas (
-            pizza:pizza_id (
-              id,
-              name,
-              vegetarian,
-              vegan
-            )
-          )
-        )
-      `,
-    )
+    .select("package_id")
     .eq("id", eventId)
     .maybeSingle();
 
-  if (error) {
-    throw error;
+  if (eventError) {
+    throw eventError;
   }
 
-  if (!data) {
+  const packageId = (eventRow as { package_id: string | null } | null)
+    ?.package_id;
+
+  if (!packageId) {
     return [];
   }
 
-  const packageData = (
-    data as {
-      packages?: Package & { package_pizzas?: Array<{ pizza?: Pizza }> };
-    }
-  ).packages;
-  const pizzas = packageData?.package_pizzas ?? [];
+  const { data: pizzaRows, error: pizzasError } = await supabase
+    .from("package_pizzas")
+    .select("pizza:pizza_id ( id, name, vegetarian, vegan )")
+    .eq("package_id", packageId);
 
-  return pizzas
-    .map((entry) => entry.pizza)
+  if (pizzasError) {
+    throw pizzasError;
+  }
+
+  return (pizzaRows ?? [])
+    .map((row) => row.pizza as Pizza | null)
     .filter((pizza): pizza is Pizza => Boolean(pizza));
 }
 
