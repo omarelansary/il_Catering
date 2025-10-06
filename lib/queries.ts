@@ -61,9 +61,13 @@ export async function getAllowedPizzasForEvent(
     throw pizzasError;
   }
 
-  return (pizzaRows ?? [])
-    .map((row) => row.pizza as Pizza | null)
-    .filter((pizza): pizza is Pizza => Boolean(pizza));
+  const pizzas = pizzaRows ?? [];
+
+  return pizzas
+    .map((row) => (row as { pizza?: unknown }).pizza)
+    .filter(
+      (pizza): pizza is Pizza => typeof pizza === "object" && pizza !== null,
+    ) as Pizza[];
 }
 
 export async function getPizzaTotals(eventId: string): Promise<PizzaTotal[]> {
