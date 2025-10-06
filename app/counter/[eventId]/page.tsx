@@ -1,25 +1,26 @@
-'use client';
+"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import supabase from "../../../lib/supabaseClient";
-import { PIZZA_TYPES, type PizzaId } from "../../../lib/pizzaConfig";
+import {
+  getAllowedPizzasForEvent,
+  getEventById,
+  getPizzaTotals,
+  upsertPizzaTotals,
+} from "../../../lib/queries";
+import type { EventRow, Pizza, PizzaTotal } from "../../../lib/types";
 
 interface CounterPageProps {
   params: { eventId: string };
 }
 
-interface EventDetails {
-  name: string | null;
-  event_date: string | null;
-}
-
-type Totals = Record<PizzaId, number>;
+type Totals = Record<string, number>;
 
 type Feedback = { type: "success" | "error"; text: string } | null;
 
 interface SnapshotItem {
-  item: PizzaId;
+  pizza_id: string;
   new_qty: number;
 }
 
@@ -27,21 +28,33 @@ interface Snapshot {
   key: string;
   at: string;
   items: SnapshotItem[];
-  highlighted: PizzaId[];
+  highlighted: string[];
   summary: string;
 }
-const pizzaIdSet = new Set<PizzaId>(PIZZA_TYPES.map((pizza) => pizza.id));
-const pizzaLabelById = Object.fromEntries(
-  PIZZA_TYPES.map((pizza) => [pizza.id, pizza.label])
-) as Record<PizzaId, string>;
 
-const isPizzaId = (value: string): value is PizzaId => pizzaIdSet.has(value as PizzaId);
+const sanitizeQty = (value: number) =>
+  Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
 
-const buildInitialTotals = (): Totals =>
-  PIZZA_TYPES.reduce((acc, pizza) => {
+const buildInitialTotals = (pizzas: Pizza[] = []): Totals =>
+  pizzas.reduce((acc, pizza) => {
     acc[pizza.id] = 0;
     return acc;
   }, {} as Totals);
+
+const normalizeTotals = (
+  pizzas: Pizza[] = [],
+  input: Partial<Totals> | Totals = {},
+): Totals => {
+  const result = buildInitialTotals(pizzas);
+  for (const pizza of pizzas) {
+    const value = (input as Totals)[pizza.id];
+    result[pizza.id] = sanitizeQty(typeof value === "number" ? value : 0);
+  }
+  return result;
+};
+
+const totalsEqual = (pizzas: Pizza[] = [], a: Totals, b: Totals) =>
+  pizzas.every((pizza) => (a[pizza.id] ?? 0) === (b[pizza.id] ?? 0));
 
 const getLocalISODate = (date: Date) => {
   const offsetMs = date.getTimezoneOffset() * 60_000;
@@ -73,7 +86,7 @@ const formatDisplayDate = (value: string | null | undefined) => {
   return new Intl.DateTimeFormat(undefined, {
     year: "numeric",
     month: "long",
-    day: "numeric"
+    day: "numeric",
   }).format(parsed);
 };
 
@@ -84,47 +97,56 @@ const formatDisplayDateTime = (value: string) => {
   }
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
-    timeStyle: "short"
+    timeStyle: "short",
   }).format(parsed);
 };
 
-const sanitizeQty = (value: number) =>
-  Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
-
-const normalizeTotals = (input: Partial<Record<PizzaId, number>> | Totals): Totals => {
-  const result = buildInitialTotals();
-  for (const pizza of PIZZA_TYPES) {
-    const value = (input as Totals)[pizza.id];
-    result[pizza.id] = sanitizeQty(typeof value === "number" ? value : 0);
+const getErrorMessage = (error: unknown, fallback: string) => {
+  if (typeof error === "string" && error.trim()) {
+    return error;
   }
-  return result;
+  if (error && typeof error === "object" && "message" in error) {
+    const message = String((error as { message?: unknown }).message ?? "");
+    if (message.trim()) {
+      return message;
+    }
+  }
+  return fallback;
 };
 
-const totalsEqual = (a: Totals, b: Totals) =>
-  PIZZA_TYPES.every((pizza) => (a[pizza.id] ?? 0) === (b[pizza.id] ?? 0));
-
-
-const buildSnapshotSummary = (items: SnapshotItem[]) =>
-  PIZZA_TYPES.map((pizza) => {
-    const match = items.find((item) => item.item === pizza.id);
-    if (!match) {
-      return null;
-    }
-    const label = pizza.label.split(" ")[0] ?? pizza.label;
-    return `${label}:${match.new_qty}`;
-  })
-    .filter(Boolean)
-    .join(", ") || "No data";
+const buildSnapshotSummary = (pizzas: Pizza[], items: SnapshotItem[]) => {
+  const labelById = new Map(pizzas.map((pizza) => [pizza.id, pizza.name]));
+  return (
+    pizzas
+      .map((pizza) => {
+        const match = items.find((item) => item.pizza_id === pizza.id);
+        if (!match) {
+          return null;
+        }
+        const label =
+          (labelById.get(pizza.id) ?? pizza.id).split(" ")[0] ?? pizza.id;
+        return `${label}:${match.new_qty}`;
+      })
+      .filter(Boolean)
+      .join(", ") || "No data"
+  );
+};
 
 const buildSnapshots = (
-  rows: Array<{ item: string | null; new_qty: number | null; at: string | null }>
+  rows: Array<{
+    pizza_id: string | null;
+    new_qty: number | null;
+    at: string | null;
+  }>,
+  pizzas: Pizza[],
 ): Snapshot[] => {
+  const allowedIds = new Set(pizzas.map((pizza) => pizza.id));
   const normalizedRows = rows
     .map((row) => {
-      if (!row.at || typeof row.item !== "string" || row.new_qty === null) {
+      if (!row.at || typeof row.pizza_id !== "string" || row.new_qty === null) {
         return null;
       }
-      if (!isPizzaId(row.item)) {
+      if (!allowedIds.has(row.pizza_id)) {
         return null;
       }
       const atDate = new Date(row.at);
@@ -132,36 +154,38 @@ const buildSnapshots = (
         return null;
       }
       return {
-        item: row.item as PizzaId,
+        pizza_id: row.pizza_id,
         new_qty: sanitizeQty(row.new_qty),
-        at: atDate
+        at: atDate,
       };
     })
-    .filter((row): row is { item: PizzaId; new_qty: number; at: Date } => Boolean(row))
+    .filter((row): row is { pizza_id: string; new_qty: number; at: Date } =>
+      Boolean(row),
+    )
     .sort((a, b) => a.at.getTime() - b.at.getTime());
 
   if (normalizedRows.length === 0) {
     return [];
   }
 
-  const runningTotals = new Map<PizzaId, number>();
-  for (const pizza of PIZZA_TYPES) {
+  const runningTotals = new Map<string, number>();
+  for (const pizza of pizzas) {
     runningTotals.set(pizza.id, 0);
   }
 
   const snapshotsAsc: Snapshot[] = [];
   let bucketSecond: number | null = null;
   let bucketTime: Date | null = null;
-  let changedInBucket = new Set<PizzaId>();
+  let changedInBucket = new Set<string>();
 
   const flushBucket = () => {
     if (bucketSecond === null || !bucketTime) {
       return;
     }
 
-    const items: SnapshotItem[] = PIZZA_TYPES.map((pizza) => ({
-      item: pizza.id,
-      new_qty: runningTotals.get(pizza.id) ?? 0
+    const items: SnapshotItem[] = pizzas.map((pizza) => ({
+      pizza_id: pizza.id,
+      new_qty: runningTotals.get(pizza.id) ?? 0,
     }));
 
     snapshotsAsc.push({
@@ -169,7 +193,7 @@ const buildSnapshots = (
       at: bucketTime.toISOString(),
       items,
       highlighted: Array.from(changedInBucket),
-      summary: buildSnapshotSummary(items)
+      summary: buildSnapshotSummary(pizzas, items),
     });
   };
 
@@ -178,23 +202,23 @@ const buildSnapshots = (
     if (bucketSecond === null) {
       bucketSecond = second;
       bucketTime = row.at;
-      changedInBucket = new Set<PizzaId>();
+      changedInBucket = new Set<string>();
     }
 
     if (second !== bucketSecond) {
       flushBucket();
       bucketSecond = second;
       bucketTime = row.at;
-      changedInBucket = new Set<PizzaId>();
+      changedInBucket = new Set<string>();
     } else if (bucketTime && row.at.getTime() > bucketTime.getTime()) {
       bucketTime = row.at;
     }
 
-    const previousQty = runningTotals.get(row.item) ?? 0;
+    const previousQty = runningTotals.get(row.pizza_id) ?? 0;
     const nextQty = sanitizeQty(row.new_qty);
-    runningTotals.set(row.item, nextQty);
+    runningTotals.set(row.pizza_id, nextQty);
     if (nextQty !== previousQty) {
-      changedInBucket.add(row.item);
+      changedInBucket.add(row.pizza_id);
     }
   }
 
@@ -202,23 +226,49 @@ const buildSnapshots = (
 
   return snapshotsAsc.sort((a, b) => (a.at < b.at ? 1 : -1));
 };
+const buildTotalsFromRows = (rows: PizzaTotal[], pizzas: Pizza[]): Totals => {
+  const base = buildInitialTotals(pizzas);
+  if (rows.length === 0 || pizzas.length === 0) {
+    return base;
+  }
+
+  const allowedIds = new Set(pizzas.map((pizza) => pizza.id));
+  for (const row of rows) {
+    if (allowedIds.has(row.pizza_id)) {
+      base[row.pizza_id] = sanitizeQty(row.qty);
+    }
+  }
+
+  return base;
+};
 
 export default function CounterPage({ params }: CounterPageProps) {
-  const [totals, setTotals] = useState<Totals>(() => buildInitialTotals());
-  const [draftTotals, setDraftTotals] = useState<Totals>(() => buildInitialTotals());
-  const [previousTotals, setPreviousTotals] = useState<Totals>(() => buildInitialTotals());
-  const totalsRef = useRef<Totals>(buildInitialTotals());
+  const [allowedPizzas, setAllowedPizzas] = useState<Pizza[]>([]);
+  const [allowedLoading, setAllowedLoading] = useState<boolean>(true);
+  const [allowedError, setAllowedError] = useState<string | null>(null);
+  const previousAllowedRef = useRef<Pizza[]>([]);
+  const packageChangeNoticeRef = useRef<{
+    packageId: string | null;
+    removed: number;
+  } | null>(null);
+  const packageIdRef = useRef<string | null | undefined>(undefined);
+
+  const [totals, setTotals] = useState<Totals>({});
+  const [draftTotals, setDraftTotals] = useState<Totals>({});
+  const [previousTotals, setPreviousTotals] = useState<Totals>({});
+  const totalsRef = useRef<Totals>({});
   const hasLoadedRef = useRef(false);
   const [totalsLoading, setTotalsLoading] = useState<boolean>(true);
   const [totalsError, setTotalsError] = useState<string | null>(null);
 
   const [feedback, setFeedback] = useState<Feedback>(null);
-  const [saveState, setSaveState] = useState<{ item: PizzaId | null }>({ item: null });
+  const [saveState, setSaveState] = useState<{ pizzaId: string | null }>({
+    pizzaId: null,
+  });
 
-  const [eventDetails, setEventDetails] = useState<EventDetails | null>(null);
+  const [eventDetails, setEventDetails] = useState<EventRow | null>(null);
   const [eventLoading, setEventLoading] = useState<boolean>(true);
   const [eventError, setEventError] = useState<string | null>(null);
-
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -233,97 +283,175 @@ export default function CounterPage({ params }: CounterPageProps) {
 
   const eventDay = useMemo(
     () => formatDisplayDate(eventDetails?.event_date),
-    [eventDetails?.event_date]
+    [eventDetails?.event_date],
   );
 
-  const applyTotals = useCallback((incoming: Totals) => {
-    const normalized = normalizeTotals(incoming);
-      if (hasLoadedRef.current && totalsEqual(normalized, totalsRef.current)) {
-    return;
-    }
-    const previous = hasLoadedRef.current ? normalizeTotals(totalsRef.current) : normalized;
-    setPreviousTotals(previous);
-    totalsRef.current = normalized;
-    setTotals(normalized);
-    setDraftTotals({ ...normalized });
-    hasLoadedRef.current = true;
-  }, []);
-  const queryTotals = useCallback(async (): Promise<Totals> => {
-    const { data, error } = await supabase
-      .from("pizza_totals")
-      .select("item, qty")
-      .eq("event_id", params.eventId);
+  const guestsTarget = useMemo(() => {
+    const rawGuests = eventDetails?.guests;
+    const parsed =
+      typeof rawGuests === "number"
+        ? rawGuests
+        : typeof rawGuests === "string"
+          ? Number.parseInt(rawGuests, 10)
+          : null;
 
-    if (error) {
-      throw error;
+    if (typeof parsed !== "number" || Number.isNaN(parsed) || parsed <= 0) {
+      return null;
     }
 
-    const nextTotals = buildInitialTotals();
+    return parsed;
+  }, [eventDetails?.guests]);
 
-    for (const row of data ?? []) {
-      const item = typeof row.item === "string" ? row.item : null;
-      const qty = Number(row.qty ?? 0);
+  const pizzaLabelById = useMemo(
+    () =>
+      Object.fromEntries(
+        allowedPizzas.map((pizza) => [pizza.id, pizza.name]),
+      ) as Record<string, string>,
+    [allowedPizzas],
+  );
 
-      if (item && isPizzaId(item)) {
-        nextTotals[item] = sanitizeQty(qty);
+  const allowedPizzaIdSet = useMemo(
+    () => new Set(allowedPizzas.map((pizza) => pizza.id)),
+    [allowedPizzas],
+  );
+
+  const applyTotals = useCallback(
+    (incoming: Totals, pizzas: Pizza[] = allowedPizzas) => {
+      const normalized = normalizeTotals(pizzas, incoming);
+      if (
+        hasLoadedRef.current &&
+        totalsEqual(pizzas, normalized, totalsRef.current)
+      ) {
+        return;
       }
-    }
+      const previous = hasLoadedRef.current
+        ? normalizeTotals(pizzas, totalsRef.current)
+        : normalized;
+      setPreviousTotals(previous);
+      totalsRef.current = normalized;
+      setTotals(normalized);
+      setDraftTotals({ ...normalized });
+      hasLoadedRef.current = true;
+    },
+    [allowedPizzas],
+  );
+  const queryTotals = useCallback(
+    async (pizzas: Pizza[] = allowedPizzas): Promise<Totals> => {
+      const rows = await getPizzaTotals(params.eventId);
+      return buildTotalsFromRows(rows, pizzas);
+    },
+    [allowedPizzas, params.eventId],
+  );
 
-    return nextTotals;
-  }, [params.eventId]);
+  const applyAllowedChange = useCallback(
+    (
+      nextPizzas: Pizza[],
+      context?: { type: "package-change"; packageId: string | null },
+    ) => {
+      const previous = previousAllowedRef.current;
+      previousAllowedRef.current = nextPizzas;
+      setAllowedPizzas(nextPizzas);
 
-  const fetchTotals = useCallback(async () => {
-    if (fetchLockRef.current) {
-      return;
-    }
+      if (context?.type === "package-change") {
+        const nextIds = new Set(nextPizzas.map((pizza) => pizza.id));
+        const removed = previous.filter(
+          (pizza) => !nextIds.has(pizza.id),
+        ).length;
+        packageChangeNoticeRef.current = {
+          packageId: context.packageId ?? null,
+          removed,
+        };
+      } else {
+        packageChangeNoticeRef.current = null;
+      }
+    },
+    [],
+  );
 
-    fetchLockRef.current = true;
-    setTotalsLoading(true);
-    setTotalsError(null);
+  const fetchTotals = useCallback(
+    async (pizzas: Pizza[] = allowedPizzas) => {
+      if (fetchLockRef.current) {
+        return;
+      }
 
-    try {
-      const nextTotals = await queryTotals();
-      applyTotals(nextTotals);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not load totals.";
-      setTotalsError(message);
-    } finally {
-      fetchLockRef.current = false;
-      setTotalsLoading(false);
-    }
-  }, [applyTotals, queryTotals]);
+      fetchLockRef.current = true;
+      setTotalsLoading(true);
+
+      setTotalsError(null);
+
+      try {
+        const nextTotals = await queryTotals(pizzas);
+        applyTotals(nextTotals, pizzas);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Could not load totals.";
+        setTotalsError(message);
+      } finally {
+        fetchLockRef.current = false;
+        setTotalsLoading(false);
+      }
+    },
+    [allowedPizzas, applyTotals, queryTotals],
+  );
+
+  const refreshAllowed = useCallback(
+    async (context?: { type: "package-change"; packageId: string | null }) => {
+      setAllowedLoading(true);
+      setAllowedError(null);
+
+      try {
+        const pizzas = await getAllowedPizzasForEvent(params.eventId);
+        applyAllowedChange(pizzas, context);
+        await fetchTotals(pizzas);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Could not load allowed pizzas.";
+        setAllowedError(message);
+      } finally {
+        setAllowedLoading(false);
+      }
+    },
+    [applyAllowedChange, fetchTotals, params.eventId],
+  );
 
   const fetchEventDetails = useCallback(async () => {
     setEventLoading(true);
     setEventError(null);
 
     try {
-      const { data, error } = await supabase
-        .from("events")
-        .select("name, event_date")
-        .eq("id", params.eventId)
-        .maybeSingle();
+      const event = await getEventById(params.eventId);
+      setEventDetails(event);
 
-      if (error) {
-        throw error;
+      const newPackageId = event.package_id ?? null;
+      if (packageIdRef.current === undefined) {
+        packageIdRef.current = newPackageId;
+        await refreshAllowed();
+      } else if (packageIdRef.current !== newPackageId) {
+        packageIdRef.current = newPackageId;
+        await refreshAllowed({
+          type: "package-change",
+          packageId: newPackageId,
+        });
       }
-
-      setEventDetails(data ?? null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Could not load event details.";
+      const message =
+        err instanceof Error ? err.message : "Could not load event details.";
       setEventError(message);
       setEventDetails(null);
     } finally {
       setEventLoading(false);
     }
-  }, [params.eventId]);
+  }, [params.eventId, refreshAllowed]);
 
   const handleSynchronizeTotals = useCallback(async () => {
     try {
       const nextTotals = await queryTotals();
       applyTotals(nextTotals);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not refresh totals.";
+      const message =
+        error instanceof Error ? error.message : "Could not refresh totals.";
       setTotalsError(message);
     }
   }, [applyTotals, queryTotals]);
@@ -335,7 +463,7 @@ export default function CounterPage({ params }: CounterPageProps) {
     try {
       const { data, error } = await supabase
         .from("pizza_adjustments")
-        .select("event_id, item, new_qty, at")
+        .select("event_id, pizza_id, new_qty, at")
         .eq("event_id", params.eventId)
         .order("at", { ascending: false })
         .limit(50);
@@ -344,25 +472,43 @@ export default function CounterPage({ params }: CounterPageProps) {
         throw error;
       }
 
-      const snapshots = buildSnapshots(data ?? []);
+      const rows = (data ?? []) as Array<{
+        pizza_id: string | null;
+        new_qty: number | null;
+        at: string | null;
+      }>;
+      const snapshots = buildSnapshots(rows, allowedPizzas);
       setHistorySnapshots(snapshots);
       setHistoryNeedsRefresh(false);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not load history.";
+      const message =
+        error instanceof Error ? error.message : "Could not load history.";
       setHistoryError(message);
       setHistorySnapshots([]);
     } finally {
       setHistoryLoading(false);
     }
-  }, [params.eventId]);
-
-  useEffect(() => {
-    void fetchTotals();
-  }, [fetchTotals]);
+  }, [allowedPizzas, params.eventId]);
 
   useEffect(() => {
     void fetchEventDetails();
   }, [fetchEventDetails]);
+
+  useEffect(() => {
+    setTotals((prev) => normalizeTotals(allowedPizzas, prev));
+    setDraftTotals((prev) => normalizeTotals(allowedPizzas, prev));
+    setPreviousTotals((prev) => normalizeTotals(allowedPizzas, prev));
+    totalsRef.current = normalizeTotals(allowedPizzas, totalsRef.current);
+
+    const notice = packageChangeNoticeRef.current;
+    if (notice) {
+      setFeedback({
+        type: "success",
+        text: `Package changed to ${notice.packageId ?? "updated"}. Removed ${notice.removed} pizzas not in this package.`,
+      });
+      packageChangeNoticeRef.current = null;
+    }
+  }, [allowedPizzas]);
 
   useEffect(() => {
     if (!historyOpen || !historyNeedsRefresh || historyLoading) {
@@ -381,11 +527,11 @@ export default function CounterPage({ params }: CounterPageProps) {
           event: "*",
           schema: "public",
           table: "pizza_totals",
-          filter: `event_id=eq.${params.eventId}`
+          filter: `event_id=eq.${params.eventId}`,
         },
         () => {
           void handleSynchronizeTotals();
-        }
+        },
       )
       .subscribe();
 
@@ -393,6 +539,28 @@ export default function CounterPage({ params }: CounterPageProps) {
       void supabase.removeChannel(channel);
     };
   }, [handleSynchronizeTotals, params.eventId]);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel(`events:${params.eventId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "events",
+          filter: `id=eq.${params.eventId}`,
+        },
+        () => {
+          void fetchEventDetails();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [fetchEventDetails, params.eventId]);
 
   useEffect(() => {
     if (!feedback) {
@@ -404,95 +572,121 @@ export default function CounterPage({ params }: CounterPageProps) {
   }, [feedback]);
 
   const commitCount = useCallback(
-    async (item: PizzaId, targetValue: number) => {
-      const sanitized = sanitizeQty(targetValue);
-      setDraftTotals((current) => ({ ...current, [item]: sanitized }));
+    async (pizzaId: string, targetValue: number) => {
+      if (!allowedPizzaIdSet.has(pizzaId)) {
+        return;
+      }
 
-      const currentValue = totals[item] ?? 0;
+      const sanitized = sanitizeQty(targetValue);
+      setDraftTotals((current) => ({ ...current, [pizzaId]: sanitized }));
+
+      const currentValue = totals[pizzaId] ?? 0;
       if (sanitized === currentValue) {
         setFeedback({ type: "success", text: "All caught up." });
         return;
       }
 
-      setSaveState({ item });
+      setSaveState({ pizzaId });
       setFeedback(null);
 
       try {
-        const { error } = await supabase
-          .from("pizza_totals")
-          .upsert(
-            [
-              {
-                event_id: params.eventId,
-                item,
-                qty: sanitized,
-                updated_at: new Date().toISOString()
-              }
-            ],
-            { onConflict: "event_id,item" }
-          );
-
-        if (error) {
-          throw error;
-        }
+        await upsertPizzaTotals(params.eventId, { [pizzaId]: sanitized });
 
         setFeedback({
           type: "success",
-          text: `Saved ${pizzaLabelById[item]} count (${sanitized}).`
+          text: `Saved ${pizzaLabelById[pizzaId] ?? pizzaId} count (${sanitized}).`,
         });
 
         await handleSynchronizeTotals();
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Could not update pizzas.";
+        console.error("Failed to update pizza totals", error);
+        const message = getErrorMessage(error, "Could not update pizzas.");
         setFeedback({ type: "error", text: message });
       } finally {
-        setSaveState({ item: null });
+        setSaveState({ pizzaId: null });
       }
     },
-    [handleSynchronizeTotals, params.eventId, totals]
+    [
+      allowedPizzaIdSet,
+      handleSynchronizeTotals,
+      params.eventId,
+      pizzaLabelById,
+      totals,
+    ],
   );
 
   const handleAdjust = useCallback(
-    (item: PizzaId, delta: number) => {
-      if (saveState.item || restoringKey) {
+    (pizzaId: string, delta: number) => {
+      if (
+        !allowedPizzaIdSet.has(pizzaId) ||
+        saveState.pizzaId ||
+        restoringKey
+      ) {
         return;
       }
 
-      const currentValue = draftTotals[item] ?? 0;
+      const currentValue = draftTotals[pizzaId] ?? 0;
       const nextValue = Math.max(0, currentValue + delta);
-      void commitCount(item, nextValue);
+      void commitCount(pizzaId, nextValue);
     },
-    [commitCount, draftTotals, restoringKey, saveState.item]
+    [
+      allowedPizzaIdSet,
+      commitCount,
+      draftTotals,
+      restoringKey,
+      saveState.pizzaId,
+    ],
   );
 
-  const handleInputChange = useCallback((item: PizzaId, rawValue: string) => {
-    const numeric = Number(rawValue);
-    if (!Number.isNaN(numeric)) {
-      setDraftTotals((current) => ({ ...current, [item]: sanitizeQty(numeric) }));
-    }
-  }, []);
+  const handleInputChange = useCallback(
+    (pizzaId: string, rawValue: string) => {
+      if (!allowedPizzaIdSet.has(pizzaId)) {
+        return;
+      }
+
+      const numeric = Number(rawValue);
+      if (!Number.isNaN(numeric)) {
+        setDraftTotals((current) => ({
+          ...current,
+          [pizzaId]: sanitizeQty(numeric),
+        }));
+      }
+    },
+    [allowedPizzaIdSet],
+  );
 
   const handleInputBlur = useCallback(
-    (item: PizzaId, value: number) => {
-      void commitCount(item, value);
+    (pizzaId: string, value: number) => {
+      if (!allowedPizzaIdSet.has(pizzaId)) {
+        return;
+      }
+
+      void commitCount(pizzaId, value);
     },
-    [commitCount]
+    [allowedPizzaIdSet, commitCount],
   );
 
   const handleInputKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLInputElement>, item: PizzaId, value: number) => {
+    (
+      event: KeyboardEvent<HTMLInputElement>,
+      pizzaId: string,
+      value: number,
+    ) => {
       if (event.key === "Enter") {
         event.currentTarget.blur();
-        void commitCount(item, value);
+        void commitCount(pizzaId, value);
       }
     },
-    [commitCount]
+    [commitCount],
   );
 
   const handleFinished = useCallback(async () => {
     setFeedback(null);
     await handleSynchronizeTotals();
-    setFeedback({ type: "success", text: "Totals synced. Ready for the next rush." });
+    setFeedback({
+      type: "success",
+      text: "Totals synced. Ready for the next rush.",
+    });
   }, [handleSynchronizeTotals]);
 
   const handleOpenHistory = useCallback(() => {
@@ -500,49 +694,62 @@ export default function CounterPage({ params }: CounterPageProps) {
     setHistoryNeedsRefresh(true);
   }, []);
 
-
   const handleRestore = useCallback(
     async (snapshot: Snapshot) => {
       if (snapshot.items.length === 0) {
-        setFeedback({ type: "error", text: "Snapshot has no data to restore." });
+        setFeedback({
+          type: "error",
+          text: "Snapshot has no data to restore.",
+        });
         return;
       }
 
       setRestoringKey(snapshot.key);
       setFeedback(null);
 
-      const payload = snapshot.items.map((entry) => ({
-        event_id: params.eventId,
-        item: entry.item,
-        qty: sanitizeQty(entry.new_qty),
-        updated_at: new Date().toISOString()
-      }));
-
-      const currentTotals = normalizeTotals(totals);
-      const previousItems: SnapshotItem[] = PIZZA_TYPES.map((pizza) => ({
-        item: pizza.id,
-        new_qty: currentTotals[pizza.id] ?? 0
-      }));
-      const snapshotMap = new Map(snapshot.items.map((entry) => [entry.item, entry.new_qty]));
-      const undoHighlights = previousItems
-        .filter((entry) => entry.new_qty !== (snapshotMap.get(entry.item) ?? 0))
-        .map((entry) => entry.item);
-
       try {
-        const { error } = await supabase
-          .from("pizza_totals")
-          .upsert(payload, { onConflict: "event_id,item" });
+        const payloadEntries = snapshot.items
+          .filter((entry) => allowedPizzaIdSet.has(entry.pizza_id))
+          .map(
+            (entry) => [entry.pizza_id, sanitizeQty(entry.new_qty)] as const,
+          );
 
-        if (error) {
-          throw error;
+        if (payloadEntries.length === 0) {
+          setFeedback({
+            type: "error",
+            text: "No valid pizzas to restore for this package.",
+          });
+          setRestoringKey(null);
+          return;
         }
+
+        const payload = Object.fromEntries(payloadEntries) as Record<
+          string,
+          number
+        >;
+
+        const currentTotals = normalizeTotals(allowedPizzas, totals);
+        const previousItems: SnapshotItem[] = allowedPizzas.map((pizza) => ({
+          pizza_id: pizza.id,
+          new_qty: currentTotals[pizza.id] ?? 0,
+        }));
+        const snapshotMap = new Map(
+          snapshot.items.map((entry) => [entry.pizza_id, entry.new_qty]),
+        );
+        const undoHighlights = allowedPizzas
+          .map((pizza) => pizza.id)
+          .filter(
+            (id) => (snapshotMap.get(id) ?? 0) !== (currentTotals[id] ?? 0),
+          );
+
+        await upsertPizzaTotals(params.eventId, payload);
 
         setUndoSnapshot({
           key: `undo-${Date.now()}`,
           at: new Date().toISOString(),
           items: previousItems,
           highlighted: undoHighlights,
-          summary: buildSnapshotSummary(previousItems)
+          summary: buildSnapshotSummary(allowedPizzas, previousItems),
         });
 
         setFeedback({ type: "success", text: "Snapshot restored." });
@@ -550,13 +757,22 @@ export default function CounterPage({ params }: CounterPageProps) {
         setHistoryNeedsRefresh(true);
         await handleSynchronizeTotals();
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Could not restore snapshot.";
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Could not restore snapshot.";
         setFeedback({ type: "error", text: message });
       } finally {
         setRestoringKey(null);
       }
     },
-    [handleSynchronizeTotals, params.eventId, totals]
+    [
+      allowedPizzaIdSet,
+      allowedPizzas,
+      handleSynchronizeTotals,
+      params.eventId,
+      totals,
+    ],
   );
 
   const handleUndo = useCallback(async () => {
@@ -567,38 +783,54 @@ export default function CounterPage({ params }: CounterPageProps) {
     setRestoringKey("undo");
     setFeedback(null);
 
-    const payload = undoSnapshot.items.map((entry) => ({
-      event_id: params.eventId,
-      item: entry.item,
-      qty: sanitizeQty(entry.new_qty),
-      updated_at: new Date().toISOString()
-    }));
-
     try {
-      const { error } = await supabase
-        .from("pizza_totals")
-        .upsert(payload, { onConflict: "event_id,item" });
+      const payloadEntries = undoSnapshot.items
+        .filter((entry) => allowedPizzaIdSet.has(entry.pizza_id))
+        .map((entry) => [entry.pizza_id, sanitizeQty(entry.new_qty)] as const);
 
-      if (error) {
-        throw error;
+      if (payloadEntries.length === 0) {
+        setFeedback({
+          type: "error",
+          text: "Nothing to undo for this package.",
+        });
+        setRestoringKey(null);
+        return;
       }
 
+      const payload = Object.fromEntries(payloadEntries) as Record<
+        string,
+        number
+      >;
+
+      await upsertPizzaTotals(params.eventId, payload);
+      setFeedback({ type: "success", text: "Undo applied." });
       setUndoSnapshot(null);
-      setFeedback({ type: "success", text: "Rollback undone." });
       await handleSynchronizeTotals();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not undo rollback.";
+      const message =
+        error instanceof Error ? error.message : "Could not undo restore.";
       setFeedback({ type: "error", text: message });
     } finally {
       setRestoringKey(null);
     }
-  }, [handleSynchronizeTotals, params.eventId, undoSnapshot]);
+  }, [
+    allowedPizzaIdSet,
+    handleSynchronizeTotals,
+    params.eventId,
+    undoSnapshot,
+  ]);
 
-  const isSyncing = saveState.item !== null || restoringKey !== null;
-  const isDirty = PIZZA_TYPES.some((pizza) => draftTotals[pizza.id] !== totals[pizza.id]);
+  const isSyncing = saveState.pizzaId !== null || restoringKey !== null;
+  const isDirty = allowedPizzas.some(
+    (pizza) => draftTotals[pizza.id] !== totals[pizza.id],
+  );
   const syncStatus = isSyncing ? "syncing" : isDirty ? "stale" : "synced";
   const syncLabel =
-    syncStatus === "synced" ? "Synced" : syncStatus === "syncing" ? "Syncing..." : "Out of sync";
+    syncStatus === "synced"
+      ? "Synced"
+      : syncStatus === "syncing"
+        ? "Syncing..."
+        : "Out of sync";
   const syncIndicatorClass =
     syncStatus === "synced"
       ? "bg-emerald-500"
@@ -607,17 +839,70 @@ export default function CounterPage({ params }: CounterPageProps) {
         : "bg-rose-500";
 
   const totalPizzas = useMemo(
-    () => PIZZA_TYPES.reduce((sum, pizza) => sum + (totals[pizza.id] ?? 0), 0),
-    [totals]
+    () =>
+      allowedPizzas.reduce((sum, pizza) => sum + (totals[pizza.id] ?? 0), 0),
+    [allowedPizzas, totals],
   );
+
+  const productionProgress = useMemo(() => {
+    if (guestsTarget === null) {
+      return null;
+    }
+
+    const percentRaw =
+      guestsTarget === 0 ? 0 : (totalPizzas / guestsTarget) * 100;
+    const percent = Math.round(percentRaw * 10) / 10;
+    const barPercent = Math.max(0, Math.min(percentRaw, 100));
+    const remaining = Math.round(guestsTarget - totalPizzas);
+    const statusType =
+      remaining > 0 ? "remaining" : remaining < 0 ? "surplus" : "met";
+    const absRemaining = Math.abs(remaining);
+    const plural = absRemaining === 1 ? "" : "s";
+    let statusLabel = "Target met";
+
+    if (statusType === "remaining") {
+      statusLabel = absRemaining + " pizza" + plural + " to go";
+    } else if (statusType === "surplus") {
+      statusLabel = absRemaining + " extra pizza" + plural;
+    }
+
+    const statusClass =
+      statusType === "remaining"
+        ? "text-amber-300"
+        : statusType === "surplus"
+          ? "text-sky-300"
+          : "text-emerald-300";
+
+    const barColor =
+      statusType === "remaining"
+        ? "bg-amber-400"
+        : statusType === "surplus"
+          ? "bg-sky-400"
+          : "bg-emerald-500";
+
+    return {
+      percent,
+      barPercent,
+      remaining,
+      statusType,
+      statusLabel,
+      statusClass,
+      barColor,
+      target: guestsTarget,
+    };
+  }, [guestsTarget, totalPizzas]);
 
   return (
     <div className="space-y-8">
       <header className="space-y-4">
         <div className="space-y-1">
-          <p className="text-xs uppercase tracking-wide text-slate-400">Live counter</p>
+          <p className="text-xs uppercase tracking-wide text-slate-400">
+            Live counter
+          </p>
           <h1 className="text-3xl font-semibold text-slate-100">
-            {eventLoading ? "Loading event..." : eventDetails?.name ?? "Event"}
+            {eventLoading
+              ? "Loading event..."
+              : (eventDetails?.name ?? "Event")}
           </h1>
           {eventError ? (
             <p className="text-sm text-rose-300">{eventError}</p>
@@ -656,13 +941,22 @@ export default function CounterPage({ params }: CounterPageProps) {
 
       <div className="sticky top-0 z-20 border-b border-white/10 bg-slate-950/80 backdrop-blur">
         <div className="flex items-center justify-between gap-3 px-4 py-2 sm:px-6">
-          <p className="text-sm font-semibold text-slate-100" aria-live="polite" aria-atomic="true">
-            Total: <span className="font-semibold text-slate-100">{totalPizzas}</span>
+          <p
+            className="text-sm font-semibold text-slate-100"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            Total:{" "}
+            <span className="font-semibold text-slate-100">{totalPizzas}</span>
           </p>
           <div className="flex items-center gap-2">
             {syncStatus !== "synced" && (
-              <span className={`inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-slate-200`}>
-                <span className={`h-2 w-2 rounded-full ${syncIndicatorClass}`} />
+              <span
+                className={`inline-flex items-center gap-2 rounded-full border border-white/10 px-3 py-1 text-xs font-medium text-slate-200`}
+              >
+                <span
+                  className={`h-2 w-2 rounded-full ${syncIndicatorClass}`}
+                />
                 {syncLabel}
               </span>
             )}
@@ -698,77 +992,107 @@ export default function CounterPage({ params }: CounterPageProps) {
           </p>
         )}
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {PIZZA_TYPES.map((pizza) => {
-            const draftValue = draftTotals[pizza.id] ?? 0;
-            const isSaving = saveState.item === pizza.id;
+        {allowedError && (
+          <p className="rounded-xl border border-rose-500/40 bg-rose-950/40 px-4 py-3 text-sm text-rose-200">
+            {allowedError}
+          </p>
+        )}
 
-            return (
-              <div
-                key={pizza.id}
-                className="rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-inner shadow-black/30"
-              >
-                <header className="flex flex-col gap-1">
-                  <p className="text-lg font-semibold text-slate-100">{pizza.label}</p>
-                  <p className="text-xs uppercase tracking-wide text-slate-500">
-                    Previous count: {totalsLoading ? "--" : previousTotals[pizza.id] ?? 0}
-                  </p>
-                </header>
+        {allowedLoading && allowedPizzas.length === 0 ? (
+          <p className="text-sm text-slate-300">
+            Loading pizzas for this package...
+          </p>
+        ) : allowedPizzas.length === 0 ? (
+          <p className="text-sm text-slate-300">
+            No pizzas allowed for this package yet.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {allowedPizzas.map((pizza) => {
+              const draftValue = draftTotals[pizza.id] ?? 0;
+              const isSaving = saveState.pizzaId === pizza.id;
 
+              return (
+                <div
+                  key={pizza.id}
+                  className="rounded-2xl border border-white/10 bg-slate-900/70 p-5 shadow-inner shadow-black/30"
+                >
+                  <header className="flex flex-col gap-1">
+                    <p className="text-lg font-semibold text-slate-100">
+                      {pizzaLabelById[pizza.id]}
+                    </p>
+                    <p className="text-xs uppercase tracking-wide text-slate-500">
+                      Previous count:{" "}
+                      {totalsLoading ? "--" : (previousTotals[pizza.id] ?? 0)}
+                    </p>
+                  </header>
 
+                  <div className="mt-4 grid grid-cols-[auto,1fr,auto] items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleAdjust(pizza.id, -1)}
+                      disabled={
+                        isSaving ||
+                        restoringKey !== null ||
+                        (draftTotals[pizza.id] ?? 0) <= 0
+                      }
+                      className="inline-flex h-12 w-12 flex-none items-center justify-center rounded-full bg-slate-950/70 text-2xl font-semibold text-slate-100 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      -
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      inputMode="numeric"
+                      value={draftValue}
+                      onChange={(event) =>
+                        handleInputChange(pizza.id, event.target.value)
+                      }
+                      onBlur={(event) =>
+                        handleInputBlur(pizza.id, Number(event.target.value))
+                      }
+                      onKeyDown={(event) =>
+                        handleInputKeyDown(
+                          event,
+                          pizza.id,
+                          Number(event.currentTarget.value),
+                        )
+                      }
+                      className="h-12 w-full min-w-0 rounded-xl border border-white/10 bg-slate-950/80 px-3 text-center text-2xl font-semibold text-slate-100 focus:border-blue-400/60 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleAdjust(pizza.id, 1)}
+                      disabled={isSaving || restoringKey !== null}
+                      className="inline-flex h-12 w-12 flex-none items-center justify-center rounded-full bg-slate-950/70 text-2xl font-semibold text-slate-100 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      +
+                    </button>
+                  </div>
 
-                <div className="mt-4 grid grid-cols-[auto,1fr,auto] items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleAdjust(pizza.id, -1)}
-                    disabled={
-                      isSaving ||
-                      restoringKey !== null ||
-                      (draftTotals[pizza.id] ?? 0) <= 0
-                    }
-                    className="inline-flex h-12 w-12 flex-none items-center justify-center rounded-full bg-slate-950/70 text-2xl font-semibold text-slate-100 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    -
-                  </button>
-                  <input
-                    type="number"
-                    min={0}
-                    inputMode="numeric"
-                    value={draftValue}
-                    onChange={(event) => handleInputChange(pizza.id, event.target.value)}
-                    onBlur={(event) => handleInputBlur(pizza.id, Number(event.target.value))}
-                    onKeyDown={(event) =>
-                      handleInputKeyDown(event, pizza.id, Number(event.currentTarget.value))
-                    }
-                    className="h-12 w-full min-w-0 rounded-xl border border-white/10 bg-slate-950/80 px-3 text-center text-2xl font-semibold text-slate-100 focus:border-blue-400/60 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => handleAdjust(pizza.id, 1)}
-                    disabled={isSaving || restoringKey !== null}
-                    className="inline-flex h-12 w-12 flex-none items-center justify-center rounded-full bg-slate-950/70 text-2xl font-semibold text-slate-100 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    +
-                  </button>
+                  {isSaving && (
+                    <p className="mt-3 text-center text-xs uppercase tracking-wide text-blue-300">
+                      Syncing...
+                    </p>
+                  )}
                 </div>
-
-                {isSaving && (
-                  <p className="mt-3 text-center text-xs uppercase tracking-wide text-blue-300">
-                    Syncing...
-                  </p>
-                )}
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section className="space-y-4 rounded-2xl border border-white/10 bg-slate-900/70 p-6">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">Session summary</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+              Session summary
+            </h2>
             <p className="text-xs text-slate-400">
-              Total pizzas produced: <span className="font-semibold text-slate-100">{totalPizzas}</span>
+              Total pizzas produced:{" "}
+              <span className="font-semibold text-slate-100">
+                {totalPizzas}
+              </span>
             </p>
           </div>
           <button
@@ -780,9 +1104,53 @@ export default function CounterPage({ params }: CounterPageProps) {
           </button>
         </div>
 
+        <div className="rounded-xl border border-white/10 bg-slate-950/50 p-4">
+          <div className="flex items-center justify-between text-xs uppercase tracking-wide text-slate-400">
+            <span>Production progress</span>
+            {productionProgress ? (
+              <span className="text-sm font-semibold text-slate-100">
+                {productionProgress.percent}%
+              </span>
+            ) : null}
+          </div>
+          {productionProgress ? (
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between text-sm text-slate-300">
+                <span>
+                  {totalPizzas} / {productionProgress.target} pizzas
+                </span>
+                <span
+                  className={
+                    "text-xs font-medium " + productionProgress.statusClass
+                  }
+                >
+                  {productionProgress.statusLabel}
+                </span>
+              </div>
+              <div className="relative h-3 w-full overflow-hidden rounded-full bg-slate-800/70">
+                <div
+                  className={
+                    "h-full rounded-full " + productionProgress.barColor
+                  }
+                  style={{ width: productionProgress.barPercent + "%" }}
+                />
+                {productionProgress.percent > 100 ? (
+                  <div className="absolute inset-y-0 right-0 flex items-center pr-2 text-[10px] font-semibold text-sky-200">
+                    {Math.round(productionProgress.percent)}%
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-slate-400">
+              Add a guest count for this event to track production progress.
+            </p>
+          )}
+        </div>
+
         {showBreakdown && (
           <ul className="grid grid-cols-1 gap-2 text-sm text-slate-200 sm:grid-cols-2">
-            {[...PIZZA_TYPES]
+            {[...allowedPizzas]
               .map((pizza) => ({ ...pizza, total: totals[pizza.id] ?? 0 }))
               .sort((a, b) => b.total - a.total)
               .map((pizza) => (
@@ -790,7 +1158,7 @@ export default function CounterPage({ params }: CounterPageProps) {
                   key={pizza.id}
                   className="flex items-center justify-between rounded-lg border border-white/10 bg-slate-900/60 px-3 py-2"
                 >
-                  <span>{pizza.label}</span>
+                  <span>{pizzaLabelById[pizza.id]}</span>
                   <span className="font-semibold">{pizza.total}</span>
                 </li>
               ))}
@@ -815,8 +1183,12 @@ export default function CounterPage({ params }: CounterPageProps) {
           <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-md flex-col bg-slate-950/95 backdrop-blur">
             <header className="flex items-center justify-between border-b border-white/10 px-6 py-4">
               <div>
-                <h2 className="text-lg font-semibold text-slate-100">History</h2>
-                <p className="text-xs uppercase tracking-wide text-slate-500">Restore previous totals</p>
+                <h2 className="text-lg font-semibold text-slate-100">
+                  History
+                </h2>
+                <p className="text-xs uppercase tracking-wide text-slate-500">
+                  Restore previous totals
+                </p>
               </div>
               <button
                 type="button"
@@ -827,8 +1199,6 @@ export default function CounterPage({ params }: CounterPageProps) {
               </button>
             </header>
 
-
-
             <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
               {historyLoading ? (
                 <p className="text-sm text-slate-300">Loading history...</p>
@@ -837,7 +1207,9 @@ export default function CounterPage({ params }: CounterPageProps) {
                   {historyError}
                 </p>
               ) : historySnapshots.length === 0 ? (
-                <p className="text-sm text-slate-400">No snapshots yet. Adjust counts to create history.</p>
+                <p className="text-sm text-slate-400">
+                  No snapshots yet. Adjust counts to create history.
+                </p>
               ) : (
                 historySnapshots.map((snapshot) => (
                   <article
@@ -854,20 +1226,24 @@ export default function CounterPage({ params }: CounterPageProps) {
                         disabled={restoringKey !== null}
                         className="rounded-lg border border-blue-400/60 px-3 py-1 text-xs font-semibold text-blue-200 transition hover:bg-blue-500/10 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        {restoringKey === snapshot.key ? "Restoring..." : "Restore"}
+                        {restoringKey === snapshot.key
+                          ? "Restoring..."
+                          : "Restore"}
                       </button>
                     </div>
                     <div className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
                       {snapshot.items.map((entry) => (
                         <div
-                          key={entry.item}
+                          key={entry.pizza_id}
                           className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
-                            snapshot.highlighted.includes(entry.item)
+                            snapshot.highlighted.includes(entry.pizza_id)
                               ? "border-blue-400/60 bg-blue-500/10 text-blue-200"
                               : "border-white/10 text-slate-300"
                           }`}
                         >
-                          <span className="font-medium">{pizzaLabelById[entry.item]}</span>
+                          <span className="font-medium">
+                            {pizzaLabelById[entry.pizza_id]}
+                          </span>
                           <span>{entry.new_qty}</span>
                         </div>
                       ))}
@@ -882,44 +1258,3 @@ export default function CounterPage({ params }: CounterPageProps) {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
