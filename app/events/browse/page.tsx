@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -44,7 +44,7 @@ const formatDisplayDate = (value: string) => {
   return new Intl.DateTimeFormat(undefined, {
     year: "numeric",
     month: "long",
-    day: "numeric"
+    day: "numeric",
   }).format(parsed);
 };
 
@@ -53,7 +53,10 @@ const getDayRangeUTC = (value: string) => {
   const offsetMs = localStart.getTimezoneOffset() * 60_000;
   const utcStartMs = localStart.getTime() - offsetMs;
   const utcEndMs = utcStartMs + 24 * 60 * 60 * 1000;
-  return { start: new Date(utcStartMs).toISOString(), end: new Date(utcEndMs).toISOString() };
+  return {
+    start: new Date(utcStartMs).toISOString(),
+    end: new Date(utcEndMs).toISOString(),
+  };
 };
 
 const getUpcomingRangeUTC = (startDayISO: string, daysAhead = 30) => {
@@ -71,9 +74,14 @@ const getNextWeekendRangeUTC = (todayLocalISO: string) => {
   if (dayOfWeek === 6 || dayOfWeek === 0) {
     daysUntilSaturday += 7;
   }
-  const saturdayStartLocal = new Date(localStart.getTime() + daysUntilSaturday * DAY_MS);
+  const saturdayStartLocal = new Date(
+    localStart.getTime() + daysUntilSaturday * DAY_MS
+  );
   const mondayStartLocal = new Date(saturdayStartLocal.getTime() + 2 * DAY_MS);
-  return { startISO: toUTCISO(saturdayStartLocal), endISO: toUTCISO(mondayStartLocal) };
+  return {
+    startISO: toUTCISO(saturdayStartLocal),
+    endISO: toUTCISO(mondayStartLocal),
+  };
 };
 
 const toLocalDayKey = (value: string) => {
@@ -94,16 +102,24 @@ export default function EventsBrowsePage() {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeFilter, setActiveFilter] = useState<"today" | "tomorrow" | "weekend" | "date" | "auto">("today");
+  const [activeFilter, setActiveFilter] = useState<
+    "today" | "tomorrow" | "weekend" | "date" | "auto"
+  >("today");
   const [fallbackMode, setFallbackMode] = useState<boolean>(false);
-  const [weekendRange, setWeekendRange] = useState<{ startISO: string; endISO: string } | null>(null);
+  const [weekendRange, setWeekendRange] = useState<{
+    startISO: string;
+    endISO: string;
+  } | null>(null);
   const dateInputRef = useRef<HTMLInputElement | null>(null);
 
   const filterButtonBase =
     "inline-flex h-10 items-center rounded-lg border border-white/10 px-3 text-sm font-medium transition hover:border-blue-400/60 hover:text-blue-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400";
 
   const isTodaySelected = useMemo(() => {
-    return activeFilter === "today" || (activeFilter === "auto" && selectedDate === today);
+    return (
+      activeFilter === "today" ||
+      (activeFilter === "auto" && selectedDate === today)
+    );
   }, [activeFilter, selectedDate, today]);
 
   const handleSelectToday = useCallback(() => {
@@ -160,7 +176,11 @@ export default function EventsBrowsePage() {
       setError(null);
 
       try {
-        const runQuery = async (startISO: string, endISO: string, limit?: number) => {
+        const runQuery = async (
+          startISO: string,
+          endISO: string,
+          limit?: number
+        ) => {
           let query = supabase
             .from("events")
             .select("id, name, event_date")
@@ -205,7 +225,8 @@ export default function EventsBrowsePage() {
         }
 
         let rows = data ?? [];
-        let filtered = mode === "day" && dayKey ? filterEventsByDay(rows, dayKey) : rows;
+        let filtered =
+          mode === "day" && dayKey ? filterEventsByDay(rows, dayKey) : rows;
 
         const todayLocalISO = getLocalISODate(new Date());
 
@@ -216,10 +237,11 @@ export default function EventsBrowsePage() {
           !rangeOverride
         ) {
           const upcomingRange = getUpcomingRangeUTC(eventDate);
-          const {
-            data: upcomingData,
-            error: upcomingError
-          } = await runQuery(upcomingRange.startISO, upcomingRange.endISO, 50);
+          const { data: upcomingData, error: upcomingError } = await runQuery(
+            upcomingRange.startISO,
+            upcomingRange.endISO,
+            50
+          );
 
           if (upcomingError) {
             throw upcomingError;
@@ -236,7 +258,8 @@ export default function EventsBrowsePage() {
 
         setEvents(filtered);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Could not load events.";
+        const message =
+          err instanceof Error ? err.message : "Could not load events.";
         setError(message);
         setEvents([]);
         setFallbackMode(false);
@@ -311,7 +334,8 @@ export default function EventsBrowsePage() {
     if (deltaMs < DAY_MS) {
       return {
         label: "Starts soon",
-        className: "bg-amber-500/15 text-amber-300 border border-amber-400/30 animate-pulse"
+        className:
+          "bg-amber-500/15 text-amber-300 border border-amber-400/30 animate-pulse",
       } as const;
     }
 
@@ -320,14 +344,14 @@ export default function EventsBrowsePage() {
       const unit = days === 1 ? "day" : "days";
       return {
         label: `In ${days} ${unit}`,
-        className: "bg-blue-500/15 text-blue-300 border border-blue-400/30"
+        className: "bg-blue-500/15 text-blue-300 border border-blue-400/30",
       } as const;
     }
 
     if (deltaMs <= 7 * DAY_MS) {
       return {
         label: "Next week",
-        className: "bg-slate-500/15 text-slate-300 border border-slate-400/30"
+        className: "bg-slate-500/15 text-slate-300 border border-slate-400/30",
       } as const;
     }
 
@@ -350,10 +374,12 @@ export default function EventsBrowsePage() {
   return (
     <div className="space-y-10 py-10">
       <section className="space-y-3">
-        <h1 className="text-3xl font-semibold tracking-tight text-slate-100">Browse events</h1>
+        <h1 className="text-3xl font-semibold tracking-tight text-slate-100">
+          Browse events
+        </h1>
         <p className="text-sm text-slate-300">
-          Select a date to find scheduled events, then jump into the live counter or summary for each
-          one.
+          Select a date to find scheduled events, then jump into the live
+          counter or summary for each one.
         </p>
       </section>
 
@@ -364,7 +390,9 @@ export default function EventsBrowsePage() {
               type="button"
               onClick={handleSelectToday}
               className={`${filterButtonBase} ${
-                isTodaySelected ? "bg-slate-800 text-slate-100" : "text-slate-300"
+                isTodaySelected
+                  ? "bg-slate-800 text-slate-100"
+                  : "text-slate-300"
               }`}
               aria-pressed={isTodaySelected}
             >
@@ -374,7 +402,9 @@ export default function EventsBrowsePage() {
               type="button"
               onClick={handleSelectTomorrow}
               className={`${filterButtonBase} ${
-                activeFilter === "tomorrow" ? "bg-slate-800 text-slate-100" : "text-slate-300"
+                activeFilter === "tomorrow"
+                  ? "bg-slate-800 text-slate-100"
+                  : "text-slate-300"
               }`}
               aria-pressed={activeFilter === "tomorrow"}
             >
@@ -384,7 +414,9 @@ export default function EventsBrowsePage() {
               type="button"
               onClick={handleSelectWeekend}
               className={`${filterButtonBase} ${
-                activeFilter === "weekend" ? "bg-slate-800 text-slate-100" : "text-slate-300"
+                activeFilter === "weekend"
+                  ? "bg-slate-800 text-slate-100"
+                  : "text-slate-300"
               }`}
               aria-pressed={activeFilter === "weekend"}
             >
@@ -392,15 +424,6 @@ export default function EventsBrowsePage() {
             </button>
           </div>
           <div>
-            <label
-              htmlFor="event-date"
-              className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400"
-            >
-              <span>Event date (local timezone)</span>
-              <span className="text-[0.65rem] font-medium uppercase tracking-wide text-slate-500">
-                Pick a date
-              </span>
-            </label>
             <input
               id="event-date"
               type="date"
@@ -424,15 +447,13 @@ export default function EventsBrowsePage() {
           >
             {loading ? "Loading..." : "Refresh"}
           </button>
-          <p className="text-sm text-slate-400" aria-live="polite">
-            {contextDescription}
-          </p>
         </div>
 
         {fallbackMode && (
           <div className="flex flex-wrap items-center gap-3 rounded-xl border border-blue-400/20 bg-blue-500/5 px-4 py-3 text-sm text-blue-200">
             <span>
-              No events on {formatDisplayDate(selectedDate)}. Showing upcoming events.
+              No events on {formatDisplayDate(selectedDate)}. Showing upcoming
+              events.
             </span>
             <button
               type="button"
@@ -458,7 +479,8 @@ export default function EventsBrowsePage() {
 
         {!fallbackMode && !error && !loading && events.length === 0 && (
           <p className="rounded-xl border border-white/10 bg-slate-900/60 px-4 py-6 text-sm text-slate-300">
-            No events scheduled for this date. Pick another day to explore past or upcoming events.
+            No events scheduled for this date. Pick another day to explore past
+            or upcoming events.
           </p>
         )}
 
@@ -473,7 +495,10 @@ export default function EventsBrowsePage() {
                 className="relative overflow-hidden rounded-xl border border-white/10 bg-slate-900/60 p-6 shadow-lg shadow-black/20"
               >
                 {isNextUp && (
-                  <span className="absolute inset-y-4 left-0 w-1 rounded-full bg-amber-400" aria-hidden="true" />
+                  <span
+                    className="absolute inset-y-4 left-0 w-1 rounded-full bg-amber-400"
+                    aria-hidden="true"
+                  />
                 )}
                 <div className={isNextUp ? "pl-3" : undefined}>
                   {isNextUp && (
@@ -483,7 +508,9 @@ export default function EventsBrowsePage() {
                   )}
                   <div className="flex items-center justify-between">
                     <div>
-                      <h2 className="text-xl font-semibold text-slate-100">{event.name}</h2>
+                      <h2 className="text-xl font-semibold text-slate-100">
+                        {event.name}
+                      </h2>
                       <p className="flex flex-wrap items-center gap-2 text-xs uppercase tracking-wide text-slate-400">
                         {formatDisplayDate(event.event_date)}
                         {proximity && (
@@ -495,7 +522,9 @@ export default function EventsBrowsePage() {
                         )}
                       </p>
                     </div>
-                    <span className="text-xs uppercase tracking-wide text-blue-300">Live counter</span>
+                    <span className="text-xs uppercase tracking-wide text-blue-300">
+                      Live counter
+                    </span>
                   </div>
                   <div className="mt-6 flex flex-col gap-2 text-sm">
                     <Link

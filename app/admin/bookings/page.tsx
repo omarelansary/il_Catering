@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import supabase from "../../../lib/supabaseClient";
 import { buildIcs } from "../../../lib/ics";
+import type { PackageId } from "../../../lib/types";
 
 type Booking = {
   id: string;
@@ -11,7 +12,8 @@ type Booking = {
   customer_phone: string | null;
   event_date: string | null;
   address: string;
-  package: string;
+  package: PackageId | null;
+  guests: number | null;
   status: "requested" | "approved" | "rejected" | "converted";
   notes: string | null;
   created_at: string | null;
@@ -172,7 +174,9 @@ export default function AdminBookingsPage() {
             name: approveForm.name.trim(),
             event_date: isoEventDate,
             address: approveForm.address.trim(),
-            status: "approved"
+            status: "approved",
+            package_id: selectedBooking?.package ?? null,
+            guests: selectedBooking?.guests ?? null
           }
         ])
         .select("id")
@@ -353,7 +357,7 @@ export default function AdminBookingsPage() {
                       {booking.address}
                     </td>
                     <td className="px-4 py-3 text-sm text-slate-200 capitalize">
-                      {booking.package}
+                      {booking.package ?? "\u2014"}
                     </td>
                     <td className="px-4 py-3 text-sm font-medium capitalize text-slate-200">
                       {booking.status}
